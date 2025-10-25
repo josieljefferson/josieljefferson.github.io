@@ -1,0 +1,428 @@
+name: "🔄 Manutenção Unificada (Playlists + Limpeza + Deploy)"
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Diariamente às 00:00 BRT - Playlists
+    - cron: '0 15 * * *'  # 12:00 BRT - Limpeza de arquivos
+    - cron: '1 */8 * * *' # A cada 8 horas - Limpeza de execuções
+    - cron: '25 10 * * *' # 07:25 BRT - Deploy
+  workflow_dispatch:
+    inputs:
+      force_operation:
+        description: 'Forçar operação específica'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - playlists
+          - cleanup_files
+          - cleanup_runs
+          - deploy
+
+env:
+  TZ: America/Fortaleza
+  PYTHONUNBUFFERED: 1
+  PIP_CACHE_DIR: /tmp/pip-cache
+
+permissions:
+  contents: write
+  actions: write
+  pages: write
+  id-token: write
+
+jobs:
+  # ✅ 1. JOB: Processamento de Playlists (OTIMIZADO)
+  process-playlists:
+    name: "📥 Processar Playlists"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    if: >-
+      github.event.inputs.force_operation == 'all' ||
+      github.event.inputs.force_operation == 'playlists' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *')
+    
+    steps:
+      - name: "🔽 Checkout Otimizado"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          sparse-checkout: |
+            *.py
+            *.m3u
+            *.xml.gz
+            requirements.txt
+
+      - name: "🐍 Configurar Python com Cache"
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: '**/requirements.txt'
+
+      - name: "⚙️ Instalar Dependências Rápido"
+        run: |
+          pip install --cache-dir /tmp/pip-cache --upgrade pip
+          pip install --cache-dir /tmp/pip-cache --no-cache-dir requests beautifulsoup4 aiohttp asyncio
+
+      - name: "▶️ Executar Scripts em Paralelo"
+        run: |
+          # Função para executar script com timeout e logging
+          run_script() {
+            local script=$1
+            local timeout=300
+            echo "🕐 Executando $script (timeout: ${timeout}s)"
+            
+            if timeout $timeout python "$script"; then
+              echo "✅ $script concluído com sucesso"
+              return 0
+            else
+              echo "⚠️ $script falhou ou atingiu timeout"
+              return 1
+            fi
+          }
+          
+          # Executar scripts principais
+          run_script "playlists.py" &
+          # run_script "playlists2.py" &  # Descomente se necessário
+          # run_script "Playlist.py" &    # Descomente se necessário
+          
+          # Aguardar conclusão de todos
+          wait
+          echo "🎯 Todos os scripts de playlist finalizados"
+
+      - name: "⏱️ Adicionar Timestamp Eficiente"
+        run: |
+          timestamp=$(TZ='America/Fortaleza' date '+%d/%m/%Y - %H:%M:%S')
+          export timestamp
+          
+          # Processar arquivos em lote
+          find . -maxdepth 1 -type f \( -name "*.m3u" -o -name "*.xml.gz" \) -print0 | \
+          xargs -0 -P 4 -I {} sh -c '
+            echo -e "\n\n# Atualizado em $timestamp BRT" >> "$1"
+            echo "📝 Timestamp adicionado: $1"
+          ' _ {}
+
+      - name: "💾 Commit Rápido das Alterações"
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global pull.rebase false
+          
+          # Verificar mudanças de forma eficiente
+          changed_files=$(git status --porcelain | wc -l)
+          
+          if [ "$changed_files" -gt 0 ]; then
+            echo "📦 $changed_files arquivos modificados"
+            git add -A
+            git commit -m "🔄 Atualização automática das playlists $(TZ='America/Fortaleza' date '+%d/%m %H:%M')"
+            
+            # Pull com estratégia de fallback
+            git pull origin main --no-edit --strategy-option=theirs || true
+            
+            # Push com retry
+            for i in 1 2 3; do
+              if git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" main; then
+                echo "✅ Push realizado com sucesso"
+                break
+              else
+                echo "🔄 Tentativa $i falhou, aguardando..."
+                sleep 5
+              fi
+            done
+          else
+            echo "✅ Nenhuma alteração detectada"
+          fi
+
+  # ✅ 2. JOB: Limpeza de Arquivos (OTIMIZADO)
+  cleanup-files:
+    name: "🗑️ Limpar Arquivos Temporários"
+    runs-on: ubuntu-latest
+    needs: process-playlists
+    timeout-minutes: 10
+    
+    if: >-
+      github.event.inputs.force_operation == 'all' ||
+      github.event.inputs.force_operation == 'cleanup_files' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 15 * * *')
+    
+    steps:
+      - name: "🔽 Checkout Rápido"
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            *
+            !.git
+
+      - name: "🗑️ Limpeza Eficiente de Arquivos"
+        run: |
+          # Arquivos essenciais para manter
+          declare -A keep_files=(
+            ["README.md"]=1 [".gitignore"]=1 ["index.html"]=1
+            ["script.js"]=1 ["style.css"]=1 ["deploy.py"]=1
+            ["playlists.py"]=1 ["playlists2.py"]=1 ["Playlist.py"]=1
+            ["downloads_files.py"]=1 ["generate_metadata.js"]=1 
+            ["files_metadata.json"]=1 [".github"]=1
+          )
+          
+          # Padrões para deletar (mais específicos primeiro)
+          patterns=(
+            "coroa_vidaloka-*.mp4"
+            "majormarra-*.mp4" 
+            "marinahelenabr-*.jpg"
+            "*-*-*.jpg" "*-*-*.mp4" "*-*-*.png"
+            "temp_*.txt" "*.tmp" "*.temp"
+          )
+          
+          echo "🔍 Iniciando limpeza eficiente..."
+          total_freed=0
+          deleted_count=0
+          
+          # Função para verificar se deve manter
+          should_keep() {
+            local file="$1"
+            [[ -n "${keep_files[$file]}" ]] && return 0
+            [[ "$file" == *.github/* ]] && return 0
+            [[ "$file" == .github/* ]] && return 0
+            return 1
+          }
+          
+          # Processar padrões em paralelo quando possível
+          for pattern in "${patterns[@]}"; do
+            while IFS= read -r -d '' file; do
+              filename=$(basename "$file")
+              
+              if ! should_keep "$filename" && [[ -f "$file" ]]; then
+                file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+                if rm -f "$file"; then
+                  echo "🗑️ Deletado: $file ($((file_size/1024)) KB)"
+                  ((total_freed += file_size))
+                  ((deleted_count++))
+                fi
+              fi
+            done < <(find . -name "$pattern" -type f -print0 2>/dev/null || true)
+          done
+          
+          echo "📊 Resumo da limpeza:"
+          echo "   📁 Arquivos deletados: $deleted_count"
+          echo "   💾 Espaço liberado: $((total_freed/1024/1024)) MB"
+
+      - name: "💾 Commit da Limpeza"
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git diff-index --quiet HEAD --; then
+            echo "✅ Nenhum arquivo para limpar"
+          else
+            git add -A
+            git commit -m "🧹 Limpeza de arquivos temporários - $(TZ='America/Fortaleza' date '+%d/%m %H:%M')"
+            
+            # Push direto e rápido
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" main
+            echo "✅ Limpeza commitada com sucesso"
+          fi
+
+  # ✅ 3. JOB: Limpeza de Execuções (SUPER OTIMIZADO)
+  cleanup-runs:
+    name: "🧹 Limpar Execuções Antigas"
+    runs-on: ubuntu-latest
+    needs: cleanup-files
+    timeout-minutes: 5
+    
+    if: >-
+      github.event.inputs.force_operation == 'all' ||
+      github.event.inputs.force_operation == 'cleanup_runs' ||
+      (github.event_name == 'schedule' && startsWith(github.event.schedule, '1 */8'))
+    
+    steps:
+      - name: "🗑️ Limpeza Rápida de Execuções"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "🚀 Iniciando limpeza otimizada de execuções..."
+          
+          # Configurações
+          WORKFLOW_NAME="🔄 Manutenção Unificada (Playlists + Limpeza + Deploy)"
+          KEEP_RUNS=5  # Manter as últimas 5 execuções
+          BATCH_SIZE=10
+          
+          # Obter workflow ID de forma eficiente
+          echo "📋 Obtendo ID do workflow..."
+          WORKFLOW_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows")
+          
+          WORKFLOW_ID=$(echo "$WORKFLOW_JSON" | jq -r --arg name "$WORKFLOW_NAME" '.workflows[] | select(.name == $name) | .id')
+          
+          if [[ -z "$WORKFLOW_ID" || "$WORKFLOW_ID" == "null" ]]; then
+            echo "❌ Workflow não encontrado: $WORKFLOW_NAME"
+            exit 1
+          fi
+          
+          echo "🎯 Workflow ID: $WORKFLOW_ID"
+          
+          # Obter execuções antigas (exceto as últimas KEEP_RUNS)
+          echo "🔍 Buscando execuções para limpar..."
+          RUNS_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/runs?per_page=100&status=completed")
+          
+          # Extrair IDs das execuções antigas
+          OLD_RUN_IDS=$(echo "$RUNS_JSON" | jq -r ".workflow_runs[$KEEP_RUNS:] | .[] | select(.status == \"completed\") | .id")
+          
+          if [[ -z "$OLD_RUN_IDS" ]]; then
+            echo "✅ Nenhuma execução antiga para limpar"
+            exit 0
+          fi
+          
+          RUN_COUNT=$(echo "$OLD_RUN_IDS" | wc -l | tr -d ' ')
+          echo "🗑️ Encontradas $RUN_COUNT execuções para limpar"
+          
+          # Deletar em lotes para melhor performance
+          counter=0
+          batch=()
+          
+          delete_batch() {
+            local batch_ids=("$@")
+            local deleted_in_batch=0
+            
+            for run_id in "${batch_ids[@]}"; do
+              if [[ -n "$run_id" ]]; then
+                response_code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+                  -H "Authorization: token $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id")
+                
+                if [[ "$response_code" == "204" ]]; then
+                  echo "✅ Deletado: $run_id"
+                  ((deleted_in_batch++))
+                  ((counter++))
+                else
+                  echo "⚠️ Falha em $run_id (HTTP $response_code)"
+                fi
+                
+                # Pequena pausa para evitar rate limiting
+                sleep 0.5
+              fi
+            done
+            
+            echo "📦 Lote processado: $deleted_in_batch execuções deletadas"
+          }
+          
+          # Processar em lotes
+          while IFS= read -r run_id; do
+            batch+=("$run_id")
+            
+            if [[ ${#batch[@]} -ge $BATCH_SIZE ]]; then
+              delete_batch "${batch[@]}"
+              batch=()
+            fi
+          done <<< "$OLD_RUN_IDS"
+          
+          # Processar último lote
+          if [[ ${#batch[@]} -gt 0 ]]; then
+            delete_batch "${batch[@]}"
+          fi
+          
+          echo "🎉 Limpeza finalizada: $counter execuções removidas"
+
+  # ✅ 4. JOB: Deploy para GitHub Pages (OTIMIZADO)
+  deploy-pages:
+    name: "🚀 Deploy GitHub Pages"
+    runs-on: ubuntu-latest
+    needs: cleanup-runs
+    timeout-minutes: 8
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    if: >-
+      github.event.inputs.force_operation == 'all' ||
+      github.event.inputs.force_operation == 'deploy' ||
+      (github.event_name == 'schedule' && github.event.schedule == '25 10 * * *')
+    
+    steps:
+      - name: "🔽 Checkout para Deploy"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: "🏗️ Configuração Rápida do Pages"
+        uses: actions/configure-pages@v4
+        with:
+          enablement: true
+
+      - name: "📦 Upload Otimizado do Artifact"
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+          exclude-assets: |
+            *.py
+            *.sh
+            .github/workflows/*
+            scripts/
+            *.tmp
+            *.temp
+          retention-days: 1
+
+      - name: "🚀 Deploy com Retry"
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          timeout: 60000
+          error-count: 3
+
+      - name: "📊 Status do Deploy"
+        run: |
+          if [[ "${{ steps.deployment.outcome }}" == "success" ]]; then
+            echo "🎉 Deploy realizado com sucesso!"
+            echo "🌐 URL: ${{ steps.deployment.outputs.page_url }}"
+          else
+            echo "❌ Deploy falhou"
+            exit 1
+          fi
+
+  # ✅ 5. JOB: Relatório Final (NOVO)
+  report:
+    name: "📊 Relatório de Execução"
+    runs-on: ubuntu-latest
+    needs: [process-playlists, cleanup-files, cleanup-runs, deploy-pages]
+    if: always()
+    
+    steps:
+      - name: "📈 Gerar Relatório"
+        run: |
+          echo "📊 RELATÓRIO DA MANUTENÇÃO UNIFICADA"
+          echo "======================================"
+          echo "🕐 Timestamp: $(TZ='America/Fortaleza' date '+%d/%m/%Y %H:%M:%S BRT')"
+          echo "🔧 Workflow: ${{ github.workflow }}"
+          echo "🎯 Trigger: ${{ github.event_name }}"
+          echo ""
+          echo "📋 STATUS DOS JOBS:"
+          echo "-------------------"
+          echo "📥 Playlists: ${{ needs.process-playlists.result }}"
+          echo "🗑️ Limpeza Arquivos: ${{ needs.cleanup-files.result }}"
+          echo "🧹 Limpeza Execuções: ${{ needs.cleanup-runs.result }}"
+          echo "🚀 Deploy Pages: ${{ needs.deploy-pages.result }}"
+          echo ""
+          
+          if [[ "${{ needs.process-playlists.result }}" == "success" && \
+                "${{ needs.cleanup-files.result }}" == "success" && \
+                "${{ needs.cleanup-runs.result }}" == "success" && \
+                "${{ needs.deploy-pages.result }}" == "success" ]]; then
+            echo "✅ TODAS AS OPERAÇÕES CONCLUÍDAS COM SUCESSO"
+            echo "🎯 Sistema otimizado e atualizado"
+          else
+            echo "⚠️ ALGUMAS OPERAÇÕES ENCONTRARAM PROBLEMAS"
+            echo "📝 Verifique os logs para detalhes"
+          fi
