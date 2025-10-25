@@ -1,0 +1,31 @@
+# ARQUIVO: .github/workflows/quick-cleanup.yml
+name: "⚡ Limpeza Rápida"
+
+on:
+  workflow_dispatch:
+    inputs:
+      age_hours:
+        description: 'Idade mínima das execuções (horas)'
+        required: false
+        default: '1'
+      delete_files:
+        description: 'Também limpar arquivos temporários?'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  quick-cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "🗑️ Limpar execuções"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGE_HOURS: ${{ github.event.inputs.age_hours }}
+        run: |
+          gh api --method DELETE \
+            "/repos/${{ github.repository }}/actions/runs" \
+            --jq '.total_count' \
+            -H "Accept: application/vnd.github.v3+json" \
+            --silent || true
+          echo "✅ Limpeza rápida concluída"

@@ -1,0 +1,322 @@
+# ARQUIVO: .github/workflows/unified-workflow.yml
+name: "🔄 Workflow Unificado (Playlists + Limpeza + Deploy)"
+
+on:
+  schedule:
+    - cron: '0 3 * * *'      # Playlists - 00:00 BRT
+    - cron: '0 15 * * *'     # Limpeza arquivos - 12:00 BRT  
+    - cron: '1 */12 * * *'   # Limpeza execuções - a cada 12h
+    - cron: '25 10 * * *'    # Deploy - 07:25 BRT
+  workflow_dispatch:
+    inputs:
+      action_type:
+        description: 'Tipo de ação a executar'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - playlists
+        - cleanup
+        - deploy
+        - delete_files
+
+env:
+  TZ: America/Fortaleza
+  PYTHON_VERSION: '3.10'
+  NODE_VERSION: '18'
+
+permissions:
+  contents: write
+  actions: write
+  pages: write
+  id-token: write
+
+jobs:
+  # JOB 1: Processamento de Playlists
+  process-playlists:
+    name: "📥 Processar Playlists"
+    runs-on: ubuntu-latest
+    if: |
+      github.event.inputs.action_type == 'all' ||
+      github.event.inputs.action_type == 'playlists' ||
+      github.event_name == 'schedule'
+    
+    steps:
+      - name: "🔽 Checkout do repositório"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "🐍 Configurar Python"
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: "📦 Cache de dependências"
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.npm
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements.txt', '**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: "⚙️ Instalar dependências Python"
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml
+
+      - name: "▶️ Executar scripts de playlists"
+        run: |
+          set -e
+          echo "Executando scripts de playlists..."
+          # Executa apenas scripts existentes
+          [ -f "playlists.py" ] && python playlists.py || echo "playlists.py não encontrado"
+          [ -f "deployment.py" ] && python deployment.py || echo "deployment.py não encontrado"
+
+      - name: "⏱️ Adicionar timestamp"
+        run: |
+          for file in $(find . -maxdepth 1 -type f \( -name "*.m3u" -o -name "*.xml" -o -name "*.xml.gz" \)); do
+            echo -e "\n# Atualizado em $(TZ='America/Fortaleza' date '+%d/%m/%Y - %H:%M:%S') BRT" >> "$file"
+          done
+
+      - name: "💾 Commit das alterações"
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Verifica se há mudanças
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "✅ Nenhuma alteração detectada."
+          else
+            git add .
+            git commit -m "🔄 Atualização automática de playlists - $(date +'%d/%m/%Y %H:%M')"
+            git pull --rebase origin main
+            git push origin main
+            echo "✅ Alterações commitadas com sucesso."
+          fi
+
+  # JOB 2: Limpeza de Arquivos Temporários
+  cleanup-files:
+    name: "🗑️ Limpar Arquivos Temporários"
+    runs-on: ubuntu-latest
+    needs: process-playlists
+    if: |
+      github.event.inputs.action_type == 'all' ||
+      github.event.inputs.action_type == 'delete_files' ||
+      github.event.inputs.action_type == 'cleanup' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 15 * * *')
+    
+    steps:
+      - name: "🔽 Checkout do repositório"
+        uses: actions/checkout@v4
+
+      - name: "🗑️ Remover arquivos temporários"
+        run: |
+          set -e
+          echo "🔍 Procurando arquivos para remover..."
+          
+          # Padrões de arquivos para remover
+          patterns=(
+            "*.mp4"
+            "*.jpg"
+            "*.jpeg"
+            "*.png"
+            "coroa_vidaloka-*.mp4"
+            "majormarra-*.mp4"
+            "marinahelenabr-*.jpg"
+            "*-index.htmll"
+            "downloads_files..py.py"
+          )
+          
+          # Arquivos específicos para manter (não remover)
+          keep_files=(
+            "playlists.py"
+            "deployment.py"
+            "generate_metadata.js"
+            "downloads_files.py"
+            "README.md"
+            ".gitignore"
+          )
+          
+          removed_count=0
+          for pattern in "${patterns[@]}"; do
+            for file in $pattern; do
+              if [[ -f "$file" ]]; then
+                # Verifica se o arquivo não está na lista de manter
+                should_keep=false
+                for keep in "${keep_files[@]}"; do
+                  if [[ "$file" == "$keep" ]]; then
+                    should_keep=true
+                    break
+                  fi
+                done
+                
+                if [[ "$should_keep" == "false" ]]; then
+                  echo "🗑️ Removendo: $file"
+                  rm -f "$file"
+                  removed_count=$((removed_count + 1))
+                fi
+              fi
+            done
+          done
+          
+          echo "✅ Total de arquivos removidos: $removed_count"
+
+      - name: "💾 Commit da limpeza"
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "✅ Nenhum arquivo para remover."
+          else
+            git add .
+            git commit -m "🧹 Limpeza de arquivos temporários - $(date +'%d/%m/%Y %H:%M')"
+            git pull --rebase origin main
+            git push origin main
+          fi
+
+  # JOB 3: Limpeza de Execuções Antigas
+  cleanup-runs:
+    name: "🧹 Limpar Execuções Antigas"
+    runs-on: ubuntu-latest
+    if: |
+      github.event.inputs.action_type == 'all' ||
+      github.event.inputs.action_type == 'cleanup' ||
+      github.event_name == 'schedule'
+    
+    permissions:
+      actions: write
+      contents: read
+    
+    steps:
+      - name: "🗑️ Limpar execuções antigas (1h+)"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "🔍 Iniciando limpeza de execuções antigas..."
+          
+          now=$(date -u +%s)
+          deleted=0
+          page=1
+          per_page=100
+          
+          while true; do
+            echo "📄 Verificando página $page..."
+            
+            response=$(gh api \
+              -H "Accept: application/vnd.github.v3+json" \
+              "/repos/${{ github.repository }}/actions/runs?per_page=$per_page&page=$page" \
+              --jq '.workflow_runs[] | select(.status != "in_progress") | {id, created_at, status, name}' || true)
+            
+            if [[ -z "$response" ]]; then
+              echo "✅ Fim das execuções."
+              break
+            fi
+            
+            echo "$response" | jq -c '.' | while read -r run; do
+              id=$(echo "$run" | jq -r '.id')
+              created_at=$(echo "$run" | jq -r '.created_at')
+              name=$(echo "$run" | jq -r '.name')
+              
+              # Converter data para timestamp
+              if run_date=$(date -u -d "$created_at" +%s 2>/dev/null); then
+                :
+              elif run_date=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$created_at" +%s 2>/dev/null); then
+                :
+              else
+                echo "⚠️ Data inválida: $created_at"
+                continue
+              fi
+              
+              diff_hours=$(( (now - run_date) / 3600 ))
+              
+              if [[ $diff_hours -ge 1 ]]; then
+                echo "🗑️ Removendo execução: $name (ID: $id, $diff_hours horas)"
+                if gh api \
+                  --method DELETE \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "/repos/${{ github.repository }}/actions/runs/$id" \
+                  --silent; then
+                  deleted=$((deleted + 1))
+                else
+                  echo "❌ Falha ao remover execução: $id"
+                fi
+              else
+                echo "✅ Mantendo execução: $name ($diff_hours horas)"
+              fi
+            done
+            
+            page=$((page + 1))
+          done
+          
+          echo "🏁 Limpeza concluída. Execuções removidas: $deleted"
+
+  # JOB 4: Deploy para GitHub Pages
+  deploy-pages:
+    name: "🚀 Deploy GitHub Pages"
+    runs-on: ubuntu-latest
+    needs: [process-playlists, cleanup-files]
+    if: |
+      github.event.inputs.action_type == 'all' ||
+      github.event.inputs.action_type == 'deploy' ||
+      (github.event_name == 'schedule' && github.event.schedule == '25 10 * * *') ||
+      github.event_name == 'push'
+    
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+      - name: "🔽 Checkout do repositório"
+        uses: actions/checkout@v4
+
+      - name: "🐍 Configurar Python"
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: "⚙️ Instalar dependências"
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: "📥 Executar script de download"
+        run: |
+          [ -f "downloads_files.py" ] && python downloads_files.py || echo "downloads_files.py não encontrado"
+
+      - name: "🛠️ Configurar Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: "📊 Gerar metadados"
+        run: |
+          [ -f "generate_metadata.js" ] && node generate_metadata.js || echo "generate_metadata.js não encontrado"
+
+      - name: "🏗️ Preparar diretório de build"
+        run: |
+          mkdir -p public
+          # Copiar arquivos para publicação
+          cp -f *.html *.js *.json *.m3u *.xml *.xml.gz public/ 2>/dev/null || true
+          
+          echo "📁 Conteúdo do diretório public:"
+          ls -la public/ || echo "Diretório public vazio"
+
+      - name: "🚀 Deploy no GitHub Pages"
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+          force_orphan: true
